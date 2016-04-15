@@ -17,6 +17,14 @@ simple, easily portable across kernel versions and run with a negligible
 overhead. We believe that making these tools part of the kernel developers'
 tool belt can help keep this type of bugs at bay.
 
+# Important note about the patches
+
+Note: the main point of our paper is to raise awareness about issues in the
+Linux scheduler. The provided patches fix the issues encountered with our
+workloads, but they are not intended as generic bug fixes. They may have
+unwanted side effects and result in performance loss or energy waste on your
+machine.
+
 # Article
 
 **The Linux Scheduler: a Decade of Wasted Cores**, Jean-Pierre Lozi, Baptiste
