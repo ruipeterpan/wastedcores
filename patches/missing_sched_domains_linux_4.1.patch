@@ -1,7 +1,18 @@
 diff -uprNw -X linux-4.1.vanilla/Documentation/dontdiff linux-4.1.vanilla/arch/x86/kernel/smpboot.c linux-4.1.missing-sched-domains/arch/x86/kernel/smpboot.c
 --- linux-4.1.vanilla/arch/x86/kernel/smpboot.c	2015-06-21 22:05:43.000000000 -0700
-+++ linux-4.1.missing-sched-domains/arch/x86/kernel/smpboot.c	2015-11-05 00:54:31.329592670 -0800
-@@ -445,7 +445,12 @@ void set_cpu_sibling_map(int cpu)
++++ linux-4.1.missing-sched-domains/arch/x86/kernel/smpboot.c	2016-04-30 15:24:41.796729160 -0700
+@@ -100,6 +100,10 @@ EXPORT_PER_CPU_SYMBOL(cpu_info);
+ 
+ atomic_t init_deasserted;
+ 
++#ifdef CONFIG_NUMA
++extern int sched_max_numa_distance;
++#endif
++
+ static inline void smpboot_setup_warm_reset_vector(unsigned long start_eip)
+ {
+ 	unsigned long flags;
+@@ -445,7 +449,12 @@ void set_cpu_sibling_map(int cpu)
  			} else if (i != cpu && !c->booted_cores)
  				c->booted_cores = cpu_data(i).booted_cores;
  		}
@@ -16,7 +27,7 @@ diff -uprNw -X linux-4.1.vanilla/Documentation/dontdiff linux-4.1.vanilla/arch/x
  }
 diff -uprNw -X linux-4.1.vanilla/Documentation/dontdiff linux-4.1.vanilla/kernel/sched/core.c linux-4.1.missing-sched-domains/kernel/sched/core.c
 --- linux-4.1.vanilla/kernel/sched/core.c	2015-06-21 22:05:43.000000000 -0700
-+++ linux-4.1.missing-sched-domains/kernel/sched/core.c	2015-11-05 01:08:25.009554228 -0800
++++ linux-4.1.missing-sched-domains/kernel/sched/core.c	2016-04-30 14:35:33.896865093 -0700
 @@ -6130,7 +6130,7 @@ static void claim_allocations(int cpu, s
  static int sched_domains_numa_levels;
  enum numa_topology_type sched_numa_topology_type;
