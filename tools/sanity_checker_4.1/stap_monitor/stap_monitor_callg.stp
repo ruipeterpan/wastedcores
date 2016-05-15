@@ -1,0 +1,154 @@
+#! /usr/bin/env stap
+
+global active
+global current_indexes
+global current_lines[100000]
+global buggy_lines[100000]
+global in_load_balancing
+global threshold = 10
+
+probe module("stap_monitor") . function("change_cpu_status") . call {
+   if($status >= threshold && !active[$cpu]) {
+      printf("CPU %d status - activated\n", $cpu);
+   } else if(active[$cpu]) {
+      printf("CPU %d status - deactivated\n", $cpu);
+   }
+   if($status >= threshold) {
+      active[$cpu] = 1;
+   } else {
+      active[$cpu] = 0;
+   }
+}
+
+probe kernel.statement("load_balance@kernel/sched/fair.c:*"),
+kernel.statement("should_we_balance@kernel/sched/fair.c:*"),
+kernel.statement("find_busiest_group@kernel/sched/fair.c:*"),
+kernel.statement("init_sd_lb_stats@kernel/sched/fair.c:*"),
+kernel.statement("update_sd_lb_stats@kernel/sched/fair.c:*"),
+kernel.statement("get_sd_load_idx@kernel/sched/fair.c:*"),
+kernel.statement("update_group_capacity@kernel/sched/fair.c:*"),
+kernel.statement("update_cpu_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("arch_scale_smt_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("default_scale_smt_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("arch_scale_freq_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("default_scale_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("scale_rt_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("update_sg_lb_stats@kernel/sched/fair.c:*"),
+#kernel.statement("target_load@kernel/sched/fair.c:*"),
+#kernel.statement("weighted_cpuload@kernel/sched/fair.c:*"),
+#kernel.statement("sg_imbalanced@kernel/sched/fair.c:*"),
+#kernel.statement("sg_capacity_factor@kernel/sched/fair.c:*"),
+#kernel.statement("fix_small_capacity@kernel/sched/fair.c:*"),
+#kernel.statement("source_load@kernel/sched/fair.c:*"),
+#kernel.statement("check_asym_packing@kernel/sched/fair.c:*"),
+#kernel.statement("calculate_imbalance@kernel/sched/fair.c:*"),
+kernel.statement("find_busiest_queue@kernel/sched/fair.c:*"),
+#kernel.statement("fbq_classify_rq@kernel/sched/fair.c:*"),
+#kernel.statement("capacity_of@kernel/sched/fair.c:*"),
+#kernel.statement("move_tasks@kernel/sched/fair.c:*"),
+kernel.statement("can_migrate_task@kernel/sched/fair.c:*"),
+#kernel.statement("throttled_lb_pair@kernel/sched/fair.c:*"),
+#kernel.statement("task_hot@kernel/sched/fair.c:*"),
+#kernel.statement("migrate_improves_locality@kernel/sched/fair.c:*"),
+#kernel.statement("need_active_balance@kernel/sched/fair.c:*"),
+#kernel.statement("fbq_classify_group@kernel/sched/fair.c:*"),
+#kernel.statement("cfs_rq_of@kernel/sched/fair.c:*"),
+#kernel.statement("migrate_degrades_locality@kernel/sched/fair.c:*"),
+#kernel.statement("task_h_load@kernel/sched/fair.c:*"),
+#kernel.statement("task_cfs_rq@kernel/sched/fair.c:*"),
+#kernel.statement("update_cfs_rq_h_load@kernel/sched/fair.c:*"),
+#kernel.statement("rq_of@kernel/sched/fair.c:*"),
+#kernel.statement("move_task@kernel/sched/fair.c:*"),
+#kernel.statement("dequeue_task_fair@kernel/sched/fair.c:*"),
+#kernel.statement("dequeue_entity@kernel/sched/fair.c:*"),
+#kernel.statement("update_curr@kernel/sched/fair.c:*"),
+#kernel.statement("dequeue_entity_load_avg@kernel/sched/fair.c:*"),
+#kernel.statement("update_entity_load_avg@kernel/sched/fair.c:*"),
+#kernel.statement("cfs_rq_clock_task@kernel/sched/fair.c:*"),
+#kernel.statement("__update_entity_runnable_avg@kernel/sched/fair.c:*"),
+#kernel.statement("update_cfs_rq_blocked_load@kernel/sched/fair.c:*"),
+#kernel.statement("__update_cfs_rq_tg_load_contrib@kernel/sched/fair.c:*"),
+#kernel.statement("update_stats_dequeue@kernel/sched/fair.c:*"),
+#kernel.statement("update_stats_wait_end@kernel/sched/fair.c:*"),
+#kernel.statement("task_of@kernel/sched/fair.c:*"),
+#kernel.statement("clear_buddies@kernel/sched/fair.c:*"),
+#kernel.statement("__dequeue_entity@kernel/sched/fair.c:*"),
+#kernel.statement("account_entity_dequeue@kernel/sched/fair.c:*"),
+#kernel.statement("update_load_sub@kernel/sched/fair.c:*"),
+#kernel.statement("parent_entity@kernel/sched/fair.c:*"),
+#kernel.statement("account_numa_dequeue@kernel/sched/fair.c:*"),
+#kernel.statement("update_min_vruntime@kernel/sched/fair.c:*"),
+#kernel.statement("max_vruntime@kernel/sched/fair.c:*"),
+#kernel.statement("update_cfs_shares@kernel/sched/fair.c:*"),
+#kernel.statement("cfs_rq_throttled@kernel/sched/fair.c:*"),
+#kernel.statement("update_rq_runnable_avg@kernel/sched/fair.c:*"),
+#kernel.statement("__update_tg_runnable_avg@kernel/sched/fair.c:*"),
+#kernel.statement("hrtick_update@kernel/sched/fair.c:*"),
+#kernel.statement("migrate_task_rq_fair@kernel/sched/fair.c:*"),
+#kernel.statement("enqueue_task_fair@kernel/sched/fair.c:*"),
+#kernel.statement("enqueue_entity@kernel/sched/fair.c:*"),
+#kernel.statement("enqueue_entity_load_avg@kernel/sched/fair.c:*"),
+#kernel.statement("decay_load@kernel/sched/fair.c:*"),
+#kernel.statement("account_entity_enqueue@kernel/sched/fair.c:*"),
+#kernel.statement("update_load_add@kernel/sched/fair.c:*"),
+#kernel.statement("account_numa_enqueue@kernel/sched/fair.c:*"),
+#kernel.statement("update_stats_enqueue@kernel/sched/fair.c:*"),
+#kernel.statement("update_stats_wait_start@kernel/sched/fair.c:*"),
+#kernel.statement("check_spread@kernel/sched/fair.c:*"),
+#kernel.statement("__enqueue_entity@kernel/sched/fair.c:*"),
+#kernel.statement("list_add_leaf_cfs_rq@kernel/sched/fair.c:*"),
+#kernel.statement("check_enqueue_throttle@kernel/sched/fair.c:*"),
+#kernel.statement("__compute_runnable_contrib@kernel/sched/fair.c:*"),
+#kernel.statement("trigger_load_balance@kernel/sched/fair.c:*"),
+#kernel.statement("on_null_domain@kernel/sched/fair.c:*"),
+#kernel.statement("nohz_kick_needed@kernel/sched/fair.c:*"),
+#kernel.statement("fix_small_imbalance@kernel/sched/fair.c:*"),
+#kernel.statement("cpu_avg_load_per_task@kernel/sched/fair.c:*"),
+#kernel.statement("calc_delta_fair@kernel/sched/fair.c:*"),
+#kernel.statement("min_vruntime@kernel/sched/fair.c:*"),
+#kernel.statement("__update_entity_load_avg_contrib@kernel/sched/fair.c:*"),
+#kernel.statement("__update_task_entity_contrib@kernel/sched/fair.c:*"),
+#kernel.statement("check_preempt_wakeup@kernel/sched/fair.c:*"),
+#kernel.statement("throttled_hierarchy@kernel/sched/fair.c:*"),
+#kernel.statement("find_matching_se@kernel/sched/fair.c:*"),
+#kernel.statement("is_same_group@kernel/sched/fair.c:*"),
+#kernel.statement("wakeup_preempt_entity@kernel/sched/fair.c:*"),
+#kernel.statement("wakeup_gran@kernel/sched/fair.c:*"),
+#kernel.statement("set_next_buddy@kernel/sched/fair.c:*")
+kernel.statement("update_sd_pick_busiest@kernel/sched/fair.c:*")
+{
+   if(in_load_balancing[cpu()] != 1) next;
+   tokenize(pp(),"@");
+   fileline=tokenize("","@");
+   file=tokenize(fileline,":\"");
+   line=tokenize("",":\"");
+   i = current_indexes[cpu()];
+   current_indexes[cpu()]++;
+   current_lines[cpu(),i] = strtol(line, 10);
+}
+
+probe kernel . function("load_balance") {
+   if(active[cpu()] != 1) next;
+   printf("Load balanced called on cpu %d %s\n", cpu(), $$parms);
+   current_indexes[cpu()] = 0;
+   in_load_balancing[cpu()] = 1;
+}
+
+probe kernel . function("load_balance") . return {
+   if(in_load_balancing[cpu()] != 1) next;
+   in_load_balancing[cpu()] = 0;
+   if(active[cpu()] != 1) next;
+   if($return == 0) {
+      foreach([cpu,i] in current_lines[cpu(), *]) {
+         if(i >= current_indexes[cpu]) next;
+         buggy_lines[current_lines[cpu,i]] ++;
+      }
+   }
+}
+
+probe end, error {
+   printf("Most buggy lines:\n");
+   foreach(line+ in buggy_lines) {
+      printf("\tline: %d - %d\n", line, buggy_lines[line]);
+   }
+}

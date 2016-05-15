@@ -1,0 +1,1177 @@
+ 5594 -          - 	struct sg_lb_stats busiest_stat;/* Statistics of the busiest group */
+ 5595 -          - 	struct sg_lb_stats local_stat;	/* Statistics of the local group */
+ 5596 -          - };
+ 5597 -          - 
+ 5598 -          - static inline void init_sd_lb_stats(struct sd_lb_stats *sds)
+ 5599 - 11126 calls - {
+ 5600 -          - 	/*
+ 5601 -          - 	 * Skimp on the clearing to avoid duplicate work. We can avoid clearing
+ 5602 -          - 	 * local_stat because update_sg_lb_stats() does a full clear/assignment.
+ 5603 -          - 	 * We must however clear busiest_stat::avg_load because
+ 5604 -          - 	 * update_sd_pick_busiest() reads this before assignment.
+ 5605 -          - 	 */
+ 5606 - 11126 calls - 	*sds = (struct sd_lb_stats){
+ 5607 -          - 		.busiest = NULL,
+ 5608 -          - 		.local = NULL,
+ 5609 -          - 		.total_load = 0UL,
+ 5610 -          - 		.total_capacity = 0UL,
+ 5611 -          - 		.busiest_stat = {
+ 5612 -          - 			.avg_load = 0UL,
+ 5613 -          - 		},
+ 5614 -          - 	};
+ 5615 - 11126 calls - }
+ 5616 -          - 
+ 5617 -          - /**
+ 5618 -          -  * get_sd_load_idx - Obtain the load index for a given sched domain.
+ 5619 -          -  * @sd: The sched_domain whose load_idx is to be obtained.
+ 5620 -          -  * @idle: The idle status of the CPU for whose sd load_idx is obtained.
+ 5621 -          -  *
+ 5622 -          -  * Return: The load index.
+ 5623 -          -  */
+ 5624 -          - static inline int get_sd_load_idx(struct sched_domain *sd,
+ 5625 -          - 					enum cpu_idle_type idle)
+ 5626 - 11126 calls - {
+ 5627 -          - 	int load_idx;
+ 5628 -          - 
+ 5629 - 11126 calls - 	switch (idle) {
+ 5630 -          - 	case CPU_NOT_IDLE:
+ 5631 -  1 calls - 		load_idx = sd->busy_idx;
+ 5632 -  1 calls - 		break;
+ 5633 -          - 
+ 5634 -          - 	case CPU_NEWLY_IDLE:
+ 5635 - 2149 calls - 		load_idx = sd->newidle_idx;
+ 5636 - 2149 calls - 		break;
+ 5637 -          - 	default:
+ 5638 - 8976 calls - 		load_idx = sd->idle_idx;
+ 5639 -          - 		break;
+ 5640 -          - 	}
+ 5641 -          - 
+ 5642 - 11126 calls - 	return load_idx;
+ 5643 - 11126 calls - }
+ 5644 -          - 
+ 5645 -          - static unsigned long default_scale_capacity(struct sched_domain *sd, int cpu)
+ 5646 -          - {
+ 5647 -          - 	return SCHED_CAPACITY_SCALE;
+ 5648 -          - }
+ 5649 -          - 
+ 5650 -          - unsigned long __weak arch_scale_freq_capacity(struct sched_domain *sd, int cpu)
+ 5651 -          - {
+ 5652 -          - 	return default_scale_capacity(sd, cpu);
+ 5653 -          - }
+ 5654 -          - 
+ 5655 -          - static unsigned long default_scale_smt_capacity(struct sched_domain *sd, int cpu)
+ 5656 -          - {
+ 5657 -          - 	unsigned long weight = sd->span_weight;
+ 5658 -          - 	unsigned long smt_gain = sd->smt_gain;
+ 5659 -          - 
+ 5660 -          - 	smt_gain /= weight;
+ 5661 -          - 
+ 5662 -          - 	return smt_gain;
+ 5663 -          - }
+ 5664 -          - 
+ 5665 -          - unsigned long __weak arch_scale_smt_capacity(struct sched_domain *sd, int cpu)
+ 5666 -          - {
+ 5667 -          - 	return default_scale_smt_capacity(sd, cpu);
+ 5668 -          - }
+ 5669 -          - 
+ 5670 -          - static unsigned long scale_rt_capacity(int cpu)
+ 5671 -          - {
+ 5672 -          - 	struct rq *rq = cpu_rq(cpu);
+ 5673 -          - 	u64 total, available, age_stamp, avg;
+ 5674 -          - 	s64 delta;
+ 5675 -          - 
+ 5676 -          - 	/*
+ 5677 -          - 	 * Since we're reading these variables without serialization make sure
+ 5678 -          - 	 * we read them once before doing sanity checks on them.
+ 5679 -          - 	 */
+ 5680 -          - 	age_stamp = ACCESS_ONCE(rq->age_stamp);
+ 5681 -          - 	avg = ACCESS_ONCE(rq->rt_avg);
+ 5682 -          - 
+ 5683 -          - 	delta = rq_clock(rq) - age_stamp;
+ 5684 -          - 	if (unlikely(delta < 0))
+ 5685 -          - 		delta = 0;
+ 5686 -          - 
+ 5687 -          - 	total = sched_avg_period() + delta;
+ 5688 -          - 
+ 5689 -          - 	if (unlikely(total < avg)) {
+ 5690 -          - 		/* Ensures that capacity won't end up being negative */
+ 5691 -          - 		available = 0;
+ 5692 -          - 	} else {
+ 5693 -          - 		available = total - avg;
+ 5694 -          - 	}
+ 5695 -          - 
+ 5696 -          - 	if (unlikely((s64)total < SCHED_CAPACITY_SCALE))
+ 5697 -          - 		total = SCHED_CAPACITY_SCALE;
+ 5698 -          - 
+ 5699 -          - 	total >>= SCHED_CAPACITY_SHIFT;
+ 5700 -          - 
+ 5701 -          - 	return div_u64(available, total);
+ 5702 -          - }
+ 5703 -          - 
+ 5704 -          - static void update_cpu_capacity(struct sched_domain *sd, int cpu)
+ 5705 - 6187 calls - {
+ 5706 - 6187 calls - 	unsigned long weight = sd->span_weight;
+ 5707 - 6187 calls - 	unsigned long capacity = SCHED_CAPACITY_SCALE;
+ 5708 - 6187 calls - 	struct sched_group *sdg = sd->groups;
+ 5709 -          - 
+ 5710 - 6187 calls - 	if ((sd->flags & SD_SHARE_CPUCAPACITY) && weight > 1) {
+ 5711 -          - 		if (sched_feat(ARCH_CAPACITY))
+ 5712 - 6187 calls - 			capacity *= arch_scale_smt_capacity(sd, cpu);
+ 5713 -          - 		else
+ 5714 -          - 			capacity *= default_scale_smt_capacity(sd, cpu);
+ 5715 -          - 
+ 5716 - 6187 calls - 		capacity >>= SCHED_CAPACITY_SHIFT;
+ 5717 -          - 	}
+ 5718 -          - 
+ 5719 - 6187 calls - 	sdg->sgc->capacity_orig = capacity;
+ 5720 -          - 
+ 5721 -          - 	if (sched_feat(ARCH_CAPACITY))
+ 5722 - 6187 calls - 		capacity *= arch_scale_freq_capacity(sd, cpu);
+ 5723 -          - 	else
+ 5724 -          - 		capacity *= default_scale_capacity(sd, cpu);
+ 5725 -          - 
+ 5726 - 6187 calls - 	capacity >>= SCHED_CAPACITY_SHIFT;
+ 5727 -          - 
+ 5728 - 6187 calls - 	capacity *= scale_rt_capacity(cpu);
+ 5729 - 6187 calls - 	capacity >>= SCHED_CAPACITY_SHIFT;
+ 5730 -          - 
+ 5731 - 6187 calls - 	if (!capacity)
+ 5732 -          - 		capacity = 1;
+ 5733 -          - 
+ 5734 - 6187 calls - 	cpu_rq(cpu)->cpu_capacity = capacity;
+ 5735 - 6187 calls - 	sdg->sgc->capacity = capacity;
+ 5736 - 6187 calls - }
+ 5737 -          - 
+ 5738 -          - void update_group_capacity(struct sched_domain *sd, int cpu)
+ 5739 - 9355 calls - {
+ 5740 - 9355 calls - 	struct sched_domain *child = sd->child;
+ 5741 - 9355 calls - 	struct sched_group *group, *sdg = sd->groups;
+ 5742 -          - 	unsigned long capacity, capacity_orig;
+ 5743 -          - 	unsigned long interval;
+ 5744 -          - 
+ 5745 - 9355 calls - 	interval = msecs_to_jiffies(sd->balance_interval);
+ 5746 - 9355 calls - 	interval = clamp(interval, 1UL, max_load_balance_interval);
+ 5747 - 9355 calls - 	sdg->sgc->next_update = jiffies + interval;
+ 5748 -          - 
+ 5749 - 9355 calls - 	if (!child) {
+ 5750 - 6187 calls - 		update_cpu_capacity(sd, cpu);
+ 5751 - 6187 calls - 		return;
+ 5752 -          - 	}
+ 5753 -          - 
+ 5754 - 3168 calls - 	capacity_orig = capacity = 0;
+ 5755 -          - 
+ 5756 - 3168 calls - 	if (child->flags & SD_OVERLAP) {
+ 5757 -          - 		/*
+ 5758 -          - 		 * SD_OVERLAP domains cannot assume that child groups
+ 5759 -          - 		 * span the current group.
+ 5760 -          - 		 */
+ 5761 -          - 
+ 5762 - 1136 calls - 		for_each_cpu(cpu, sched_group_cpus(sdg)) {
+ 5763 -          - 			struct sched_group_capacity *sgc;
+ 5764 - 63616 calls - 			struct rq *rq = cpu_rq(cpu);
+ 5765 -          - 
+ 5766 -          - 			/*
+ 5767 -          - 			 * build_sched_domains() -> init_sched_groups_capacity()
+ 5768 -          - 			 * gets here before we've attached the domains to the
+ 5769 -          - 			 * runqueues.
+ 5770 -          - 			 *
+ 5771 -          - 			 * Use capacity_of(), which is set irrespective of domains
+ 5772 -          - 			 * in update_cpu_capacity().
+ 5773 -          - 			 *
+ 5774 -          - 			 * This avoids capacity/capacity_orig from being 0 and
+ 5775 -          - 			 * causing divide-by-zero issues on boot.
+ 5776 -          - 			 *
+ 5777 -          - 			 * Runtime updates will correct capacity_orig.
+ 5778 -          - 			 */
+ 5779 - 63616 calls - 			if (unlikely(!rq->sd)) {
+ 5780 -          - 				capacity_orig += capacity_of(cpu);
+ 5781 -          - 				capacity += capacity_of(cpu);
+ 5782 -          - 				continue;
+ 5783 -          - 			}
+ 5784 -          - 
+ 5785 - 63616 calls - 			sgc = rq->sd->groups->sgc;
+ 5786 - 63616 calls - 			capacity_orig += sgc->capacity_orig;
+ 5787 - 63616 calls - 			capacity += sgc->capacity;
+ 5788 -          - 		}
+ 5789 -          - 	} else  {
+ 5790 -          - 		/*
+ 5791 -          - 		 * !SD_OVERLAP domains can assume that child groups
+ 5792 -          - 		 * span the current group.
+ 5793 -          - 		 */ 
+ 5794 -          - 
+ 5795 - 2032 calls - 		group = child->groups;
+ 5796 -          - 		do {
+ 5797 - 4428 calls - 			capacity_orig += group->sgc->capacity_orig;
+ 5798 - 4428 calls - 			capacity += group->sgc->capacity;
+ 5799 - 4428 calls - 			group = group->next;
+ 5800 - 4428 calls - 		} while (group != child->groups);
+ 5801 -          - 	}
+ 5802 -          - 
+ 5803 - 3168 calls - 	sdg->sgc->capacity_orig = capacity_orig;
+ 5804 - 3168 calls - 	sdg->sgc->capacity = capacity;
+ 5805 - 9355 calls - }
+ 5806 -          - 
+ 5807 -          - /*
+ 5808 -          -  * Try and fix up capacity for tiny siblings, this is needed when
+ 5809 -          -  * things like SD_ASYM_PACKING need f_b_g to select another sibling
+ 5810 -          -  * which on its own isn't powerful enough.
+ 5811 -          -  *
+ 5812 -          -  * See update_sd_pick_busiest() and check_asym_packing().
+ 5813 -          -  */
+ 5814 -          - static inline int
+ 5815 -          - fix_small_capacity(struct sched_domain *sd, struct sched_group *group)
+ 5816 -          - {
+ 5817 -          - 	/*
+ 5818 -          - 	 * Only siblings can have significantly less than SCHED_CAPACITY_SCALE
+ 5819 -          - 	 */
+ 5820 -          - 	if (!(sd->flags & SD_SHARE_CPUCAPACITY))
+ 5821 -          - 		return 0;
+ 5822 -          - 
+ 5823 -          - 	/*
+ 5824 -          - 	 * If ~90% of the cpu_capacity is still there, we're good.
+ 5825 -          - 	 */
+ 5826 -          - 	if (group->sgc->capacity * 32 > group->sgc->capacity_orig * 29)
+ 5827 -          - 		return 1;
+ 5828 -          - 
+ 5829 -          - 	return 0;
+ 5830 -          - }
+ 5831 -          - 
+ 5832 -          - /*
+ 5833 -          -  * Group imbalance indicates (and tries to solve) the problem where balancing
+ 5834 -          -  * groups is inadequate due to tsk_cpus_allowed() constraints.
+ 5835 -          -  *
+ 5836 -          -  * Imagine a situation of two groups of 4 cpus each and 4 tasks each with a
+ 5837 -          -  * cpumask covering 1 cpu of the first group and 3 cpus of the second group.
+ 5838 -          -  * Something like:
+ 5839 -          -  *
+ 5840 -          -  * 	{ 0 1 2 3 } { 4 5 6 7 }
+ 5841 -          -  * 	        *     * * *
+ 5842 -          -  *
+ 5843 -          -  * If we were to balance group-wise we'd place two tasks in the first group and
+ 5844 -          -  * two tasks in the second group. Clearly this is undesired as it will overload
+ 5845 -          -  * cpu 3 and leave one of the cpus in the second group unused.
+ 5846 -          -  *
+ 5847 -          -  * The current solution to this issue is detecting the skew in the first group
+ 5848 -          -  * by noticing the lower domain failed to reach balance and had difficulty
+ 5849 -          -  * moving tasks due to affinity constraints.
+ 5850 -          -  *
+ 5851 -          -  * When this is so detected; this group becomes a candidate for busiest; see
+ 5852 -          -  * update_sd_pick_busiest(). And calculate_imbalance() and
+ 5853 -          -  * find_busiest_group() avoid some of the usual balance conditions to allow it
+ 5854 -          -  * to create an effective group imbalance.
+ 5855 -          -  *
+ 5856 -          -  * This is a somewhat tricky proposition since the next run might not find the
+ 5857 -          -  * group imbalance and decide the groups need to be balanced again. A most
+ 5858 -          -  * subtle and fragile situation.
+ 5859 -          -  */
+ 5860 -          - 
+ 5861 -          - static inline int sg_imbalanced(struct sched_group *group)
+ 5862 -          - {
+ 5863 -          - 	return group->sgc->imbalance;
+ 5864 -          - }
+ 5865 -          - 
+ 5866 -          - /*
+ 5867 -          -  * Compute the group capacity factor.
+ 5868 -          -  *
+ 5869 -          -  * Avoid the issue where N*frac(smt_capacity) >= 1 creates 'phantom' cores by
+ 5870 -          -  * first dividing out the smt factor and computing the actual number of cores
+ 5871 -          -  * and limit unit capacity with that.
+ 5872 -          -  */
+ 5873 -          - static inline int sg_capacity_factor(struct lb_env *env, struct sched_group *group)
+ 5874 -          - {
+ 5875 -          - 	unsigned int capacity_factor, smt, cpus;
+ 5876 -          - 	unsigned int capacity, capacity_orig;
+ 5877 -          - 
+ 5878 -          - 	capacity = group->sgc->capacity;
+ 5879 -          - 	capacity_orig = group->sgc->capacity_orig;
+ 5880 -          - 	cpus = group->group_weight;
+ 5881 -          - 
+ 5882 -          - 	/* smt := ceil(cpus / capacity), assumes: 1 < smt_capacity < 2 */
+ 5883 -          - 	smt = DIV_ROUND_UP(SCHED_CAPACITY_SCALE * cpus, capacity_orig);
+ 5884 -          - 	capacity_factor = cpus / smt; /* cores */
+ 5885 -          - 
+ 5886 -          - 	capacity_factor = min_t(unsigned,
+ 5887 -          - 		capacity_factor, DIV_ROUND_CLOSEST(capacity, SCHED_CAPACITY_SCALE));
+ 5888 -          - 	if (!capacity_factor)
+ 5889 -          - 		capacity_factor = fix_small_capacity(env->sd, group);
+ 5890 -          - 
+ 5891 -          - 	return capacity_factor;
+ 5892 -          - }
+ 5893 -          - 
+ 5894 -          - /**
+ 5895 -          -  * update_sg_lb_stats - Update sched_group's statistics for load balancing.
+ 5896 -          -  * @env: The load balancing environment.
+ 5897 -          -  * @group: sched_group whose statistics are to be updated.
+ 5898 -          -  * @load_idx: Load index of sched_domain of this_cpu for load calc.
+ 5899 -          -  * @local_group: Does group contain this_cpu.
+ 5900 -          -  * @sgs: variable to hold the statistics for this group.
+ 5901 -          -  * @overload: Indicate more than one runnable task for any CPU.
+ 5902 -          -  */
+ 5903 -          - static inline void update_sg_lb_stats(struct lb_env *env,
+ 5904 -          - 			struct sched_group *group, int load_idx,
+ 5905 -          - 			int local_group, struct sg_lb_stats *sgs,
+ 5906 -          - 			bool *overload)
+ 5907 -          - {
+ 5908 -          - 	unsigned long load;
+ 5909 -          - 	int i;
+ 5910 -          - 
+ 5911 -          - 	memset(sgs, 0, sizeof(*sgs));
+ 5912 -          - 
+ 5913 -          - 	for_each_cpu_and(i, sched_group_cpus(group), env->cpus) {
+ 5914 -          - 		struct rq *rq = cpu_rq(i);
+ 5915 -          - 
+ 5916 -          - 		/* Bias balancing toward cpus of our domain */
+ 5917 -          - 		if (local_group)
+ 5918 -          - 			load = target_load(i, load_idx);
+ 5919 -          - 		else
+ 5920 -          - 			load = source_load(i, load_idx);
+ 5921 -          - 
+ 5922 -          - 		sgs->group_load += load;
+ 5923 -          - 		sgs->sum_nr_running += rq->nr_running;
+ 5924 -          - 
+ 5925 -          - 		if (rq->nr_running > 1)
+ 5926 -          - 			*overload = true;
+ 5927 -          - 
+ 5928 -          - #ifdef CONFIG_NUMA_BALANCING
+ 5929 -          - 		sgs->nr_numa_running += rq->nr_numa_running;
+ 5930 -          - 		sgs->nr_preferred_running += rq->nr_preferred_running;
+ 5931 -          - #endif
+ 5932 -          - 		sgs->sum_weighted_load += weighted_cpuload(i);
+ 5933 -          - 		if (idle_cpu(i))
+ 5934 -          - 			sgs->idle_cpus++;
+ 5935 -          - 	}
+ 5936 -          - 
+ 5937 -          - 	/* Adjust by relative CPU capacity of the group */
+ 5938 -          - 	sgs->group_capacity = group->sgc->capacity;
+ 5939 -          - 	sgs->avg_load = (sgs->group_load*SCHED_CAPACITY_SCALE) / sgs->group_capacity;
+ 5940 -          - 
+ 5941 -          - 	if (sgs->sum_nr_running)
+ 5942 -          - 		sgs->load_per_task = sgs->sum_weighted_load / sgs->sum_nr_running;
+ 5943 -          - 
+ 5944 -          - 	sgs->group_weight = group->group_weight;
+ 5945 -          - 
+ 5946 -          - 	sgs->group_imb = sg_imbalanced(group);
+ 5947 -          - 	sgs->group_capacity_factor = sg_capacity_factor(env, group);
+ 5948 -          - 
+ 5949 -          - 	if (sgs->group_capacity_factor > sgs->sum_nr_running)
+ 5950 -          - 		sgs->group_has_free_capacity = 1;
+ 5951 -          - }
+ 5952 -          - 
+ 5953 -          - /**
+ 5954 -          -  * update_sd_pick_busiest - return 1 on busiest group
+ 5955 -          -  * @env: The load balancing environment.
+ 5956 -          -  * @sds: sched_domain statistics
+ 5957 -          -  * @sg: sched_group candidate to be checked for being the busiest
+ 5958 -          -  * @sgs: sched_group statistics
+ 5959 -          -  *
+ 5960 -          -  * Determine if @sg is a busier group than the previously selected
+ 5961 -          -  * busiest group.
+ 5962 -          -  *
+ 5963 -          -  * Return: %true if @sg is a busier group than the previously selected
+ 5964 -          -  * busiest group. %false otherwise.
+ 5965 -          -  */
+ 5966 -          - static bool update_sd_pick_busiest(struct lb_env *env,
+ 5967 -          - 				   struct sd_lb_stats *sds,
+ 5968 -          - 				   struct sched_group *sg,
+ 5969 -          - 				   struct sg_lb_stats *sgs)
+ 5970 - 17153 calls - {
+ 5971 - 17153 calls - 	if (sgs->avg_load <= sds->busiest_stat.avg_load)
+ 5972 - 9609 calls - 		return false;
+ 5973 -          - 
+ 5974 - 7544 calls - 	if (sgs->sum_nr_running > sgs->group_capacity_factor)
+ 5975 - 3485 calls - 		return true;
+ 5976 -          - 
+ 5977 - 4059 calls - 	if (sgs->group_imb)
+ 5978 - 2743 calls - 		return true;
+ 5979 -          - 
+ 5980 -          - 	/*
+ 5981 -          - 	 * ASYM_PACKING needs to move all the work to the lowest
+ 5982 -          - 	 * numbered CPUs in the group, therefore mark all groups
+ 5983 -          - 	 * higher than ourself as busy.
+ 5984 -          - 	 */
+ 5985 - 1316 calls - 	if ((env->sd->flags & SD_ASYM_PACKING) && sgs->sum_nr_running &&
+ 5986 -          - 	    env->dst_cpu < group_first_cpu(sg)) {
+ 5987 -          - 		if (!sds->busiest)
+ 5988 -          - 			return true;
+ 5989 -          - 
+ 5990 -          - 		if (group_first_cpu(sds->busiest) > group_first_cpu(sg))
+ 5991 -          - 			return true;
+ 5992 -          - 	}
+ 5993 -          - 
+ 5994 - 1316 calls - 	return false;
+ 5995 - 17153 calls - }
+ 5996 -          - 
+ 5997 -          - #ifdef CONFIG_NUMA_BALANCING
+ 5998 -          - static inline enum fbq_type fbq_classify_group(struct sg_lb_stats *sgs)
+ 5999 -          - {
+ 6000 -          - 	if (sgs->sum_nr_running > sgs->nr_numa_running)
+ 6001 -          - 		return regular;
+ 6002 -          - 	if (sgs->sum_nr_running > sgs->nr_preferred_running)
+ 6003 -          - 		return remote;
+ 6004 -          - 	return all;
+ 6005 -          - }
+ 6006 -          - 
+ 6007 -          - static inline enum fbq_type fbq_classify_rq(struct rq *rq)
+ 6008 -          - {
+ 6009 -          - 	if (rq->nr_running > rq->nr_numa_running)
+ 6010 -          - 		return regular;
+ 6011 -          - 	if (rq->nr_running > rq->nr_preferred_running)
+ 6012 -          - 		return remote;
+ 6013 -          - 	return all;
+ 6014 -          - }
+ 6015 -          - #else
+ 6016 -          - static inline enum fbq_type fbq_classify_group(struct sg_lb_stats *sgs)
+ 6017 -          - {
+ 6018 -          - 	return all;
+ 6019 -          - }
+ 6020 -          - 
+ 6021 -          - static inline enum fbq_type fbq_classify_rq(struct rq *rq)
+ 6022 -          - {
+ 6023 -          - 	return regular;
+ 6024 -          - }
+ 6025 -          - #endif /* CONFIG_NUMA_BALANCING */
+ 6026 -          - 
+ 6027 -          - /**
+ 6028 -          -  * update_sd_lb_stats - Update sched_domain's statistics for load balancing.
+ 6029 -          -  * @env: The load balancing environment.
+ 6030 -          -  * @sds: variable to hold the statistics for this sched_domain.
+ 6031 -          -  */
+ 6032 -          - static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sds)
+ 6033 - 11126 calls - {
+ 6034 - 11126 calls - 	struct sched_domain *child = env->sd->child;
+ 6035 - 11126 calls - 	struct sched_group *sg = env->sd->groups;
+ 6036 -          - 	struct sg_lb_stats tmp_sgs;
+ 6037 - 11126 calls - 	int load_idx, prefer_sibling = 0;
+ 6038 - 11126 calls - 	bool overload = false;
+ 6039 -          - 
+ 6040 - 11126 calls - 	if (child && child->flags & SD_PREFER_SIBLING)
+ 6041 - 377 calls - 		prefer_sibling = 1;
+ 6042 -          - 
+ 6043 - 11126 calls - 	load_idx = get_sd_load_idx(env->sd, env->idle);
+ 6044 -          - 
+ 6045 -          - 	do {
+ 6046 - 28279 calls - 		struct sg_lb_stats *sgs = &tmp_sgs;
+ 6047 -          - 		int local_group;
+ 6048 -          - 
+ 6049 - 28279 calls - 		local_group = cpumask_test_cpu(env->dst_cpu, sched_group_cpus(sg));
+ 6050 - 28279 calls - 		if (local_group) {
+ 6051 - 11126 calls - 			sds->local = sg;
+ 6052 - 11126 calls - 			sgs = &sds->local_stat;
+ 6053 -          - 
+ 6054 - 11126 calls - 			if (env->idle != CPU_NEWLY_IDLE ||
+ 6055 - 2149 calls - 			    time_after_eq(jiffies, sg->sgc->next_update))
+ 6056 - 9355 calls - 				update_group_capacity(env->sd, env->dst_cpu);
+ 6057 -          - 		}
+ 6058 -          - 
+ 6059 - 28279 calls - 		update_sg_lb_stats(env, sg, load_idx, local_group, sgs,
+ 6060 -          - 						&overload);
+ 6061 -          - 
+ 6062 - 28279 calls - 		if (local_group)
+ 6063 - 11126 calls - 			goto next_group;
+ 6064 -          - 
+ 6065 -          - 		/*
+ 6066 -          - 		 * In case the child domain prefers tasks go to siblings
+ 6067 -          - 		 * first, lower the sg capacity factor to one so that we'll try
+ 6068 -          - 		 * and move all the excess tasks away. We lower the capacity
+ 6069 -          - 		 * of a group only if the local group has the capacity to fit
+ 6070 -          - 		 * these excess tasks, i.e. nr_running < group_capacity_factor. The
+ 6071 -          - 		 * extra check prevents the case where you always pull from the
+ 6072 -          - 		 * heaviest group when it is already under-utilized (possible
+ 6073 -          - 		 * with a large weight task outweighs the tasks on the system).
+ 6074 -          - 		 */
+ 6075 - 17153 calls - 		if (prefer_sibling && sds->local &&
+ 6076 - 2262 calls - 		    sds->local_stat.group_has_free_capacity)
+ 6077 -          - 			sgs->group_capacity_factor = min(sgs->group_capacity_factor, 1U);
+ 6078 -          - 
+ 6079 - 17153 calls - 		if (update_sd_pick_busiest(env, sds, sg, sgs)) {
+ 6080 - 6228 calls - 			sds->busiest = sg;
+ 6081 - 6228 calls - 			sds->busiest_stat = *sgs;
+ 6082 -          - 		}
+ 6083 -          - 
+ 6084 -          - next_group:
+ 6085 -          - 		/* Now, start updating sd_lb_stats */
+ 6086 - 28279 calls - 		sds->total_load += sgs->group_load;
+ 6087 - 28279 calls - 		sds->total_capacity += sgs->group_capacity;
+ 6088 -          - 
+ 6089 - 28279 calls - 		sg = sg->next;
+ 6090 - 28279 calls - 	} while (sg != env->sd->groups);
+ 6091 -          - 
+ 6092 - 11126 calls - 	if (env->sd->flags & SD_NUMA)
+ 6093 - 2726 calls - 		env->fbq_type = fbq_classify_group(&sds->busiest_stat);
+ 6094 -          - 
+ 6095 - 11126 calls - 	if (!env->sd->parent) {
+ 6096 -          - 		/* update overload indicator if we are at root domain */
+ 6097 - 2349 calls - 		if (env->dst_rq->rd->overload != overload)
+ 6098 -          - 			env->dst_rq->rd->overload = overload;
+ 6099 -          - 	}
+ 6100 -          - 
+ 6101 - 11126 calls - }
+ 6102 -          - 
+ 6103 -          - /**
+ 6104 -          -  * check_asym_packing - Check to see if the group is packed into the
+ 6105 -          -  *			sched doman.
+ 6106 -          -  *
+ 6107 -          -  * This is primarily intended to used at the sibling level.  Some
+ 6108 -          -  * cores like POWER7 prefer to use lower numbered SMT threads.  In the
+ 6109 -          -  * case of POWER7, it can move to lower SMT modes only when higher
+ 6110 -          -  * threads are idle.  When in lower SMT modes, the threads will
+ 6111 -          -  * perform better since they share less core resources.  Hence when we
+ 6112 -          -  * have idle threads, we want them to be the higher ones.
+ 6113 -          -  *
+ 6114 -          -  * This packing function is run on idle threads.  It checks to see if
+ 6115 -          -  * the busiest CPU in this domain (core in the P7 case) has a higher
+ 6116 -          -  * CPU number than the packing function is being run on.  Here we are
+ 6117 -          -  * assuming lower CPU number will be equivalent to lower a SMT thread
+ 6118 -          -  * number.
+ 6119 -          -  *
+ 6120 -          -  * Return: 1 when packing is required and a task should be moved to
+ 6121 -          -  * this CPU.  The amount of the imbalance is returned in *imbalance.
+ 6122 -          -  *
+ 6123 -          -  * @env: The load balancing environment.
+ 6124 -          -  * @sds: Statistics of the sched_domain which is to be packed
+ 6125 -          -  */
+ 6126 -          - static int check_asym_packing(struct lb_env *env, struct sd_lb_stats *sds)
+ 6127 -          - {
+ 6128 -          - 	int busiest_cpu;
+ 6129 -          - 
+ 6130 -          - 	if (!(env->sd->flags & SD_ASYM_PACKING))
+ 6131 -          - 		return 0;
+ 6132 -          - 
+ 6133 -          - 	if (!sds->busiest)
+ 6134 -          - 		return 0;
+ 6135 -          - 
+ 6136 -          - 	busiest_cpu = group_first_cpu(sds->busiest);
+ 6137 -          - 	if (env->dst_cpu > busiest_cpu)
+ 6138 -          - 		return 0;
+ 6139 -          - 
+ 6140 -          - 	env->imbalance = DIV_ROUND_CLOSEST(
+ 6141 -          - 		sds->busiest_stat.avg_load * sds->busiest_stat.group_capacity,
+ 6142 -          - 		SCHED_CAPACITY_SCALE);
+ 6143 -          - 
+ 6144 -          - 	return 1;
+ 6145 -          - }
+ 6146 -          - 
+ 6147 -          - /**
+ 6148 -          -  * fix_small_imbalance - Calculate the minor imbalance that exists
+ 6149 -          -  *			amongst the groups of a sched_domain, during
+ 6150 -          -  *			load balancing.
+ 6151 -          -  * @env: The load balancing environment.
+ 6152 -          -  * @sds: Statistics of the sched_domain whose imbalance is to be calculated.
+ 6153 -          -  */
+ 6154 -          - static inline
+ 6155 -          - void fix_small_imbalance(struct lb_env *env, struct sd_lb_stats *sds)
+ 6156 -          - {
+ 6157 -          - 	unsigned long tmp, capa_now = 0, capa_move = 0;
+ 6158 -          - 	unsigned int imbn = 2;
+ 6159 -          - 	unsigned long scaled_busy_load_per_task;
+ 6160 -          - 	struct sg_lb_stats *local, *busiest;
+ 6161 -          - 
+ 6162 -          - 	local = &sds->local_stat;
+ 6163 -          - 	busiest = &sds->busiest_stat;
+ 6164 -          - 
+ 6165 -          - 	if (!local->sum_nr_running)
+ 6166 -          - 		local->load_per_task = cpu_avg_load_per_task(env->dst_cpu);
+ 6167 -          - 	else if (busiest->load_per_task > local->load_per_task)
+ 6168 -          - 		imbn = 1;
+ 6169 -          - 
+ 6170 -          - 	scaled_busy_load_per_task =
+ 6171 -          - 		(busiest->load_per_task * SCHED_CAPACITY_SCALE) /
+ 6172 -          - 		busiest->group_capacity;
+ 6173 -          - 
+ 6174 -          - 	if (busiest->avg_load + scaled_busy_load_per_task >=
+ 6175 -          - 	    local->avg_load + (scaled_busy_load_per_task * imbn)) {
+ 6176 -          - 		env->imbalance = busiest->load_per_task;
+ 6177 -          - 		return;
+ 6178 -          - 	}
+ 6179 -          - 
+ 6180 -          - 	/*
+ 6181 -          - 	 * OK, we don't have enough imbalance to justify moving tasks,
+ 6182 -          - 	 * however we may be able to increase total CPU capacity used by
+ 6183 -          - 	 * moving them.
+ 6184 -          - 	 */
+ 6185 -          - 
+ 6186 -          - 	capa_now += busiest->group_capacity *
+ 6187 -          - 			min(busiest->load_per_task, busiest->avg_load);
+ 6188 -          - 	capa_now += local->group_capacity *
+ 6189 -          - 			min(local->load_per_task, local->avg_load);
+ 6190 -          - 	capa_now /= SCHED_CAPACITY_SCALE;
+ 6191 -          - 
+ 6192 -          - 	/* Amount of load we'd subtract */
+ 6193 -          - 	if (busiest->avg_load > scaled_busy_load_per_task) {
+ 6194 -          - 		capa_move += busiest->group_capacity *
+ 6195 -          - 			    min(busiest->load_per_task,
+ 6196 -          - 				busiest->avg_load - scaled_busy_load_per_task);
+ 6197 -          - 	}
+ 6198 -          - 
+ 6199 -          - 	/* Amount of load we'd add */
+ 6200 -          - 	if (busiest->avg_load * busiest->group_capacity <
+ 6201 -          - 	    busiest->load_per_task * SCHED_CAPACITY_SCALE) {
+ 6202 -          - 		tmp = (busiest->avg_load * busiest->group_capacity) /
+ 6203 -          - 		      local->group_capacity;
+ 6204 -          - 	} else {
+ 6205 -          - 		tmp = (busiest->load_per_task * SCHED_CAPACITY_SCALE) /
+ 6206 -          - 		      local->group_capacity;
+ 6207 -          - 	}
+ 6208 -          - 	capa_move += local->group_capacity *
+ 6209 -          - 		    min(local->load_per_task, local->avg_load + tmp);
+ 6210 -          - 	capa_move /= SCHED_CAPACITY_SCALE;
+ 6211 -          - 
+ 6212 -          - 	/* Move if we gain throughput */
+ 6213 -          - 	if (capa_move > capa_now)
+ 6214 -          - 		env->imbalance = busiest->load_per_task;
+ 6215 -          - }
+ 6216 -          - 
+ 6217 -          - /**
+ 6218 -          -  * calculate_imbalance - Calculate the amount of imbalance present within the
+ 6219 -          -  *			 groups of a given sched_domain during load balance.
+ 6220 -          -  * @env: load balance environment
+ 6221 -          -  * @sds: statistics of the sched_domain whose imbalance is to be calculated.
+ 6222 -          -  */
+ 6223 -          - static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *sds)
+ 6224 -          - {
+ 6225 -          - 	unsigned long max_pull, load_above_capacity = ~0UL;
+ 6226 -          - 	struct sg_lb_stats *local, *busiest;
+ 6227 -          - 
+ 6228 -          - 	local = &sds->local_stat;
+ 6229 -          - 	busiest = &sds->busiest_stat;
+ 6230 -          - 
+ 6231 -          - 	if (busiest->group_imb) {
+ 6232 -          - 		/*
+ 6233 -          - 		 * In the group_imb case we cannot rely on group-wide averages
+ 6234 -          - 		 * to ensure cpu-load equilibrium, look at wider averages. XXX
+ 6235 -          - 		 */
+ 6236 -          - 		busiest->load_per_task =
+ 6237 -          - 			min(busiest->load_per_task, sds->avg_load);
+ 6238 -          - 	}
+ 6239 -          - 
+ 6240 -          - 	/*
+ 6241 -          - 	 * In the presence of smp nice balancing, certain scenarios can have
+ 6242 -          - 	 * max load less than avg load(as we skip the groups at or below
+ 6243 -          - 	 * its cpu_capacity, while calculating max_load..)
+ 6244 -          - 	 */
+ 6245 -          - 	if (busiest->avg_load <= sds->avg_load ||
+ 6246 -          - 	    local->avg_load >= sds->avg_load) {
+ 6247 -          - 		env->imbalance = 0;
+ 6248 -          - 		return fix_small_imbalance(env, sds);
+ 6249 -          - 	}
+ 6250 -          - 
+ 6251 -          - 	if (!busiest->group_imb) {
+ 6252 -          - 		/*
+ 6253 -          - 		 * Don't want to pull so many tasks that a group would go idle.
+ 6254 -          - 		 * Except of course for the group_imb case, since then we might
+ 6255 -          - 		 * have to drop below capacity to reach cpu-load equilibrium.
+ 6256 -          - 		 */
+ 6257 -          - 		load_above_capacity =
+ 6258 -          - 			(busiest->sum_nr_running - busiest->group_capacity_factor);
+ 6259 -          - 
+ 6260 -          - 		load_above_capacity *= (SCHED_LOAD_SCALE * SCHED_CAPACITY_SCALE);
+ 6261 -          - 		load_above_capacity /= busiest->group_capacity;
+ 6262 -          - 	}
+ 6263 -          - 
+ 6264 -          - 	/*
+ 6265 -          - 	 * We're trying to get all the cpus to the average_load, so we don't
+ 6266 -          - 	 * want to push ourselves above the average load, nor do we wish to
+ 6267 -          - 	 * reduce the max loaded cpu below the average load. At the same time,
+ 6268 -          - 	 * we also don't want to reduce the group load below the group capacity
+ 6269 -          - 	 * (so that we can implement power-savings policies etc). Thus we look
+ 6270 -          - 	 * for the minimum possible imbalance.
+ 6271 -          - 	 */
+ 6272 -          - 	max_pull = min(busiest->avg_load - sds->avg_load, load_above_capacity);
+ 6273 -          - 
+ 6274 -          - 	/* How much load to actually move to equalise the imbalance */
+ 6275 -          - 	env->imbalance = min(
+ 6276 -          - 		max_pull * busiest->group_capacity,
+ 6277 -          - 		(sds->avg_load - local->avg_load) * local->group_capacity
+ 6278 -          - 	) / SCHED_CAPACITY_SCALE;
+ 6279 -          - 
+ 6280 -          - 	/*
+ 6281 -          - 	 * if *imbalance is less than the average load per runnable task
+ 6282 -          - 	 * there is no guarantee that any tasks will be moved so we'll have
+ 6283 -          - 	 * a think about bumping its value to force at least one task to be
+ 6284 -          - 	 * moved
+ 6285 -          - 	 */
+ 6286 -          - 	if (env->imbalance < busiest->load_per_task)
+ 6287 -          - 		return fix_small_imbalance(env, sds);
+ 6288 -          - }
+ 6289 -          - 
+ 6290 -          - /******* find_busiest_group() helpers end here *********************/
+ 6291 -          - 
+ 6292 -          - /**
+ 6293 -          -  * find_busiest_group - Returns the busiest group within the sched_domain
+ 6294 -          -  * if there is an imbalance. If there isn't an imbalance, and
+ 6295 -          -  * the user has opted for power-savings, it returns a group whose
+ 6296 -          -  * CPUs can be put to idle by rebalancing those tasks elsewhere, if
+ 6297 -          -  * such a group exists.
+ 6298 -          -  *
+ 6299 -          -  * Also calculates the amount of weighted load which should be moved
+ 6300 -          -  * to restore balance.
+ 6301 -          -  *
+ 6302 -          -  * @env: The load balancing environment.
+ 6303 -          -  *
+ 6304 -          -  * Return:	- The busiest group if imbalance exists.
+ 6305 -          -  *		- If no imbalance and user has opted for power-savings balance,
+ 6306 -          -  *		   return the least loaded group whose CPUs can be
+ 6307 -          -  *		   put to idle by rebalancing its tasks onto our group.
+ 6308 -          -  */
+ 6309 -          - static struct sched_group *find_busiest_group(struct lb_env *env)
+ 6310 - 11126 calls - {
+ 6311 -          - 	struct sg_lb_stats *local, *busiest;
+ 6312 -          - 	struct sd_lb_stats sds;
+ 6313 -          - 
+ 6314 - 11126 calls - 	init_sd_lb_stats(&sds);
+ 6315 -          - 
+ 6316 -          - 	/*
+ 6317 -          - 	 * Compute the various statistics relavent for load balancing at
+ 6318 -          - 	 * this level.
+ 6319 -          - 	 */
+ 6320 - 11126 calls - 	update_sd_lb_stats(env, &sds);
+ 6321 - 11126 calls - 	local = &sds.local_stat;
+ 6322 - 11126 calls - 	busiest = &sds.busiest_stat;
+ 6323 -          - 
+ 6324 - 11126 calls - 	if ((env->idle == CPU_IDLE || env->idle == CPU_NEWLY_IDLE) &&
+ 6325 - 11125 calls - 	    check_asym_packing(env, &sds))
+ 6326 -          - 		return sds.busiest;
+ 6327 -          - 
+ 6328 -          - 	/* There is no busy sibling group to pull tasks from */
+ 6329 - 11126 calls - 	if (!sds.busiest || busiest->sum_nr_running == 0)
+ 6330 -          - 		goto out_balanced;
+ 6331 -          - 
+ 6332 - 4742 calls - 	sds.avg_load = (SCHED_CAPACITY_SCALE * sds.total_load)
+ 6333 -          - 						/ sds.total_capacity;
+ 6334 -          - 
+ 6335 -          - 	/*
+ 6336 -          - 	 * If the busiest group is imbalanced the below checks don't
+ 6337 -          - 	 * work because they assume all things are equal, which typically
+ 6338 -          - 	 * isn't true due to cpus_allowed constraints and the like.
+ 6339 -          - 	 */
+ 6340 - 4742 calls - 	if (busiest->group_imb)
+ 6341 - 4363 calls - 		goto force_balance;
+ 6342 -          - 
+ 6343 -          - 	/* SD_BALANCE_NEWIDLE trumps SMP nice when underutilized */
+ 6344 - 379 calls - 	if (env->idle == CPU_NEWLY_IDLE && local->group_has_free_capacity &&
+ 6345 -          - 	    !busiest->group_has_free_capacity)
+ 6346 -          - 		goto force_balance;
+ 6347 -          - 
+ 6348 -          - 	/*
+ 6349 -          - 	 * If the local group is more busy than the selected busiest group
+ 6350 -          - 	 * don't try and pull any tasks.
+ 6351 -          - 	 */
+ 6352 - 379 calls - 	if (local->avg_load >= busiest->avg_load)
+ 6353 - 377 calls - 		goto out_balanced;
+ 6354 -          - 
+ 6355 -          - 	/*
+ 6356 -          - 	 * Don't pull any tasks if this group is already above the domain
+ 6357 -          - 	 * average load.
+ 6358 -          - 	 */
+ 6359 -  2 calls - 	if (local->avg_load >= sds.avg_load)
+ 6360 -  1 calls - 		goto out_balanced;
+ 6361 -          - 
+ 6362 -  1 calls - 	if (env->idle == CPU_IDLE) {
+ 6363 -          - 		/*
+ 6364 -          - 		 * This cpu is idle. If the busiest group load doesn't
+ 6365 -          - 		 * have more tasks than the number of available cpu's and
+ 6366 -          - 		 * there is no imbalance between this and busiest group
+ 6367 -          - 		 * wrt to idle cpu's, it is balanced.
+ 6368 -          - 		 */
+ 6369 -  1 calls - 		if ((local->idle_cpus < busiest->idle_cpus) &&
+ 6370 -          - 		    busiest->sum_nr_running <= busiest->group_weight)
+ 6371 -          - 			goto out_balanced;
+ 6372 -          - 	} else {
+ 6373 -          - 		/*
+ 6374 -          - 		 * In the CPU_NEWLY_IDLE, CPU_NOT_IDLE cases, use
+ 6375 -          - 		 * imbalance_pct to be conservative.
+ 6376 -          - 		 */
+ 6377 -          - 		if (100 * busiest->avg_load <=
+ 6378 -          - 				env->sd->imbalance_pct * local->avg_load)
+ 6379 -          - 			goto out_balanced;
+ 6380 -          - 	}
+ 6381 -          - 
+ 6382 -          - force_balance:
+ 6383 -          - 	/* Looks like there is an imbalance. Compute it */
+ 6384 - 4364 calls - 	calculate_imbalance(env, &sds);
+ 6385 - 4364 calls - 	return sds.busiest;
+ 6386 -          - 
+ 6387 -          - out_balanced:
+ 6388 - 6762 calls - 	env->imbalance = 0;
+ 6389 - 6762 calls - 	return NULL;
+ 6390 - 11126 calls - }
+ 6391 -          - 
+ 6392 -          - /*
+ 6393 -          -  * find_busiest_queue - find the busiest runqueue among the cpus in group.
+ 6394 -          -  */
+ 6395 -          - static struct rq *find_busiest_queue(struct lb_env *env,
+ 6396 -          - 				     struct sched_group *group)
+ 6397 - 4364 calls - {
+ 6398 - 4364 calls - 	struct rq *busiest = NULL, *rq;
+ 6399 - 4364 calls - 	unsigned long busiest_load = 0, busiest_capacity = 1;
+ 6400 -          - 	int i;
+ 6401 -          - 
+ 6402 - 4364 calls - 	for_each_cpu_and(i, sched_group_cpus(group), env->cpus) {
+ 6403 -          - 		unsigned long capacity, capacity_factor, wl;
+ 6404 -          - 		enum fbq_type rt;
+ 6405 -          - 
+ 6406 - 51481 calls - 		rq = cpu_rq(i);
+ 6407 - 51481 calls - 		rt = fbq_classify_rq(rq);
+ 6408 -          - 
+ 6409 -          - 		/*
+ 6410 -          - 		 * We classify groups/runqueues into three groups:
+ 6411 -          - 		 *  - regular: there are !numa tasks
+ 6412 -          - 		 *  - remote:  there are numa tasks that run on the 'wrong' node
+ 6413 -          - 		 *  - all:     there is no distinction
+ 6414 -          - 		 *
+ 6415 -          - 		 * In order to avoid migrating ideally placed numa tasks,
+ 6416 -          - 		 * ignore those when there's better options.
+ 6417 -          - 		 *
+ 6418 -          - 		 * If we ignore the actual busiest queue to migrate another
+ 6419 -          - 		 * task, the next balance pass can still reduce the busiest
+ 6420 -          - 		 * queue by moving tasks around inside the node.
+ 6421 -          - 		 *
+ 6422 -          - 		 * If we cannot move enough load due to this classification
+ 6423 -          - 		 * the next pass will adjust the group classification and
+ 6424 -          - 		 * allow migration of more tasks.
+ 6425 -          - 		 *
+ 6426 -          - 		 * Both cases only affect the total convergence complexity.
+ 6427 -          - 		 */
+ 6428 - 51481 calls - 		if (rt > env->fbq_type)
+ 6429 -  2 calls - 			continue;
+ 6430 -          - 
+ 6431 - 51479 calls - 		capacity = capacity_of(i);
+ 6432 - 51479 calls - 		capacity_factor = DIV_ROUND_CLOSEST(capacity, SCHED_CAPACITY_SCALE);
+ 6433 - 51479 calls - 		if (!capacity_factor)
+ 6434 -          - 			capacity_factor = fix_small_capacity(env->sd, group);
+ 6435 -          - 
+ 6436 - 51479 calls - 		wl = weighted_cpuload(i);
+ 6437 -          - 
+ 6438 -          - 		/*
+ 6439 -          - 		 * When comparing with imbalance, use weighted_cpuload()
+ 6440 -          - 		 * which is not scaled with the cpu capacity.
+ 6441 -          - 		 */
+ 6442 - 51479 calls - 		if (capacity_factor && rq->nr_running == 1 && wl > env->imbalance)
+ 6443 - 2473 calls - 			continue;
+ 6444 -          - 
+ 6445 -          - 		/*
+ 6446 -          - 		 * For the load comparisons with the other cpu's, consider
+ 6447 -          - 		 * the weighted_cpuload() scaled with the cpu capacity, so
+ 6448 -          - 		 * that the load can be moved away from the cpu that is
+ 6449 -          - 		 * potentially running at a lower capacity.
+ 6450 -          - 		 *
+ 6451 -          - 		 * Thus we're looking for max(wl_i / capacity_i), crosswise
+ 6452 -          - 		 * multiplication to rid ourselves of the division works out
+ 6453 -          - 		 * to: wl_i * capacity_j > wl_j * capacity_i;  where j is
+ 6454 -          - 		 * our previous maximum.
+ 6455 -          - 		 */
+ 6456 - 49006 calls - 		if (wl * busiest_capacity > busiest_load * capacity) {
+ 6457 - 6092 calls - 			busiest_load = wl;
+ 6458 - 6092 calls - 			busiest_capacity = capacity;
+ 6459 - 6092 calls - 			busiest = rq;
+ 6460 -          - 		}
+ 6461 -          - 	}
+ 6462 -          - 
+ 6463 - 4364 calls - 	return busiest;
+ 6464 - 4364 calls - }
+ 6465 -          - 
+ 6466 -          - /*
+ 6467 -          -  * Max backoff if we encounter pinned tasks. Pretty arbitrary value, but
+ 6468 -          -  * so long as it is large enough.
+ 6469 -          -  */
+ 6470 -          - #define MAX_PINNED_INTERVAL	512
+ 6471 -          - 
+ 6472 -          - /* Working cpumask for load_balance and load_balance_newidle. */
+ 6473 -          - DEFINE_PER_CPU(cpumask_var_t, load_balance_mask);
+ 6474 -          - 
+ 6475 -          - static int need_active_balance(struct lb_env *env)
+ 6476 -          - {
+ 6477 -          - 	struct sched_domain *sd = env->sd;
+ 6478 -          - 
+ 6479 -          - 	if (env->idle == CPU_NEWLY_IDLE) {
+ 6480 -          - 
+ 6481 -          - 		/*
+ 6482 -          - 		 * ASYM_PACKING needs to force migrate tasks from busy but
+ 6483 -          - 		 * higher numbered CPUs in order to pack all tasks in the
+ 6484 -          - 		 * lowest numbered CPUs.
+ 6485 -          - 		 */
+ 6486 -          - 		if ((sd->flags & SD_ASYM_PACKING) && env->src_cpu > env->dst_cpu)
+ 6487 -          - 			return 1;
+ 6488 -          - 	}
+ 6489 -          - 
+ 6490 -          - 	return unlikely(sd->nr_balance_failed > sd->cache_nice_tries+2);
+ 6491 -          - }
+ 6492 -          - 
+ 6493 -          - static int active_load_balance_cpu_stop(void *data);
+ 6494 -          - 
+ 6495 -          - static int should_we_balance(struct lb_env *env)
+ 6496 - 12221 calls - {
+ 6497 - 12221 calls - 	struct sched_group *sg = env->sd->groups;
+ 6498 -          - 	struct cpumask *sg_cpus, *sg_mask;
+ 6499 - 12221 calls - 	int cpu, balance_cpu = -1;
+ 6500 -          - 
+ 6501 -          - 	/*
+ 6502 -          - 	 * In the newly idle case, we will allow all the cpu's
+ 6503 -          - 	 * to do the newly idle load balance.
+ 6504 -          - 	 */
+ 6505 - 12221 calls - 	if (env->idle == CPU_NEWLY_IDLE)
+ 6506 - 2149 calls - 		return 1;
+ 6507 -          - 
+ 6508 - 10072 calls - 	sg_cpus = sched_group_cpus(sg);
+ 6509 - 10072 calls - 	sg_mask = sched_group_mask(sg);
+ 6510 -          - 	/* Try to find first idle cpu */
+ 6511 - 10072 calls - 	for_each_cpu_and(cpu, sg_cpus, env->cpus) {
+ 6512 - 33373 calls - 		if (!cpumask_test_cpu(cpu, sg_mask) || !idle_cpu(cpu))
+ 6513 -          - 			continue;
+ 6514 -          - 
+ 6515 - 9854 calls - 		balance_cpu = cpu;
+ 6516 - 9854 calls - 		break;
+ 6517 -          - 	}
+ 6518 -          - 
+ 6519 - 10072 calls - 	if (balance_cpu == -1)
+ 6520 - 218 calls - 		balance_cpu = group_balance_cpu(sg);
+ 6521 -          - 
+ 6522 -          - 	/*
+ 6523 -          - 	 * First idle cpu or the first cpu(busiest) in this sched group
+ 6524 -          - 	 * is eligible for doing load balancing at this and above domains.
+ 6525 -          - 	 */
+ 6526 - 10072 calls - 	return balance_cpu == env->dst_cpu;
+ 6527 - 12221 calls - }
+ 6528 -          - 
+ 6529 -          - /*
+ 6530 -          -  * Check this_cpu to ensure it is balanced within domain. Attempt to move
+ 6531 -          -  * tasks if there is an imbalance.
+ 6532 -          -  */
+ 6533 -          - static int load_balance(int this_cpu, struct rq *this_rq,
+ 6534 -          - 			struct sched_domain *sd, enum cpu_idle_type idle,
+ 6535 -          - 			int *continue_balancing)
+ 6536 - 9929 calls - {
+ 6537 - 9929 calls - 	int ld_moved, cur_ld_moved, active_balance = 0;
+ 6538 - 9929 calls - 	struct sched_domain *sd_parent = sd->parent;
+ 6539 -          - 	struct sched_group *group;
+ 6540 -          - 	struct rq *busiest;
+ 6541 -          - 	unsigned long flags;
+ 6542 - 9929 calls - 	struct cpumask *cpus = __get_cpu_var(load_balance_mask);
+ 6543 -          - 
+ 6544 -          - 	struct lb_env env = {
+ 6545 -          - 		.sd		= sd,
+ 6546 -          - 		.dst_cpu	= this_cpu,
+ 6547 -          - 		.dst_rq		= this_rq,
+ 6548 - 9929 calls - 		.dst_grpmask    = sched_group_cpus(sd->groups),
+ 6549 -          - 		.idle		= idle,
+ 6550 -          - 		.loop_break	= sched_nr_migrate_break,
+ 6551 -          - 		.cpus		= cpus,
+ 6552 -          - 		.fbq_type	= all,
+ 6553 -          - 	};
+ 6554 -          - 
+ 6555 -          - 	/*
+ 6556 -          - 	 * For NEWLY_IDLE load_balancing, we don't need to consider
+ 6557 -          - 	 * other cpus in our group
+ 6558 -          - 	 */
+ 6559 - 9929 calls - 	if (idle == CPU_NEWLY_IDLE)
+ 6560 - 951 calls - 		env.dst_grpmask = NULL;
+ 6561 -          - 
+ 6562 -          - 	cpumask_copy(cpus, cpu_active_mask);
+ 6563 -          - 
+ 6564 - 9929 calls - 	schedstat_inc(sd, lb_count[idle]);
+ 6565 -          - 
+ 6566 -          - redo:
+ 6567 - 12221 calls - 	if (!should_we_balance(&env)) {
+ 6568 - 1095 calls - 		*continue_balancing = 0;
+ 6569 - 1095 calls - 		goto out_balanced;
+ 6570 -          - 	}
+ 6571 -          - 
+ 6572 - 11126 calls - 	group = find_busiest_group(&env);
+ 6573 - 11126 calls - 	if (!group) {
+ 6574 - 6762 calls - 		schedstat_inc(sd, lb_nobusyg[idle]);
+ 6575 - 6762 calls - 		goto out_balanced;
+ 6576 -          - 	}
+ 6577 -          - 
+ 6578 - 4364 calls - 	busiest = find_busiest_queue(&env, group);
+ 6579 - 4364 calls - 	if (!busiest) {
+ 6580 - 2068 calls - 		schedstat_inc(sd, lb_nobusyq[idle]);
+ 6581 - 2068 calls - 		goto out_balanced;
+ 6582 -          - 	}
+ 6583 -          - 
+ 6584 - 2296 calls - 	BUG_ON(busiest == env.dst_rq);
+ 6585 -          - 
+ 6586 - 2296 calls - 	schedstat_add(sd, lb_imbalance[idle], env.imbalance);
+ 6587 -          - 
+ 6588 - 2296 calls - 	ld_moved = 0;
+ 6589 - 2296 calls - 	if (busiest->nr_running > 1) {
+ 6590 -          - 		/*
+ 6591 -          - 		 * Attempt to move tasks. If find_busiest_group has found
+ 6592 -          - 		 * an imbalance but busiest->nr_running <= 1, the group is
+ 6593 -          - 		 * still unbalanced. ld_moved simply stays zero, so it is
+ 6594 -          - 		 * correctly treated as an imbalance.
+ 6595 -          - 		 */
+ 6596 - 2292 calls - 		env.flags |= LBF_ALL_PINNED;
+ 6597 - 2292 calls - 		env.src_cpu   = busiest->cpu;
+ 6598 - 2292 calls - 		env.src_rq    = busiest;
+ 6599 -          - 		env.loop_max  = min(sysctl_sched_nr_migrate, busiest->nr_running);
+ 6600 -          - 
+ 6601 -          - more_balance:
+ 6602 - 2292 calls - 		local_irq_save(flags);
+ 6603 - 2292 calls - 		double_rq_lock(env.dst_rq, busiest);
+ 6604 -          - 
+ 6605 -          - 		/*
+ 6606 -          - 		 * cur_ld_moved - load moved in current iteration
+ 6607 -          - 		 * ld_moved     - cumulative load moved across iterations
+ 6608 -          - 		 */
+ 6609 - 2292 calls - 		cur_ld_moved = move_tasks(&env);
+ 6610 - 2292 calls - 		ld_moved += cur_ld_moved;
+ 6611 - 2292 calls - 		double_rq_unlock(env.dst_rq, busiest);
+ 6612 - 2292 calls - 		local_irq_restore(flags);
+ 6613 -          - 
+ 6614 -          - 		/*
+ 6615 -          - 		 * some other cpu did the load balance for us.
+ 6616 -          - 		 */
+ 6617 - 2292 calls - 		if (cur_ld_moved && env.dst_cpu != smp_processor_id())
+ 6618 -          - 			resched_cpu(env.dst_cpu);
+ 6619 -          - 
+ 6620 - 2292 calls - 		if (env.flags & LBF_NEED_BREAK) {
+ 6621 -          - 			env.flags &= ~LBF_NEED_BREAK;
+ 6622 -          - 			goto more_balance;
+ 6623 -          - 		}
+ 6624 -          - 
+ 6625 -          - 		/*
+ 6626 -          - 		 * Revisit (affine) tasks on src_cpu that couldn't be moved to
+ 6627 -          - 		 * us and move them to an alternate dst_cpu in our sched_group
+ 6628 -          - 		 * where they can run. The upper limit on how many times we
+ 6629 -          - 		 * iterate on same src_cpu is dependent on number of cpus in our
+ 6630 -          - 		 * sched_group.
+ 6631 -          - 		 *
+ 6632 -          - 		 * This changes load balance semantics a bit on who can move
+ 6633 -          - 		 * load to a given_cpu. In addition to the given_cpu itself
+ 6634 -          - 		 * (or a ilb_cpu acting on its behalf where given_cpu is
+ 6635 -          - 		 * nohz-idle), we now have balance_cpu in a position to move
+ 6636 -          - 		 * load to given_cpu. In rare situations, this may cause
+ 6637 -          - 		 * conflicts (balance_cpu and given_cpu/ilb_cpu deciding
+ 6638 -          - 		 * _independently_ and at _same_ time to move some load to
+ 6639 -          - 		 * given_cpu) causing exceess load to be moved to given_cpu.
+ 6640 -          - 		 * This however should not happen so much in practice and
+ 6641 -          - 		 * moreover subsequent load balance cycles should correct the
+ 6642 -          - 		 * excess load moved.
+ 6643 -          - 		 */
+ 6644 - 2292 calls - 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
+ 6645 -          - 
+ 6646 -          - 			/* Prevent to re-select dst_cpu via env's cpus */
+ 6647 -          - 			cpumask_clear_cpu(env.dst_cpu, env.cpus);
+ 6648 -          - 
+ 6649 -          - 			env.dst_rq	 = cpu_rq(env.new_dst_cpu);
+ 6650 -          - 			env.dst_cpu	 = env.new_dst_cpu;
+ 6651 -          - 			env.flags	&= ~LBF_DST_PINNED;
+ 6652 -          - 			env.loop	 = 0;
+ 6653 -          - 			env.loop_break	 = sched_nr_migrate_break;
+ 6654 -          - 
+ 6655 -          - 			/*
+ 6656 -          - 			 * Go back to "more_balance" rather than "redo" since we
+ 6657 -          - 			 * need to continue with same src_cpu.
+ 6658 -          - 			 */
+ 6659 -          - 			goto more_balance;
+ 6660 -          - 		}
+ 6661 -          - 
+ 6662 -          - 		/*
+ 6663 -          - 		 * We failed to reach balance because of affinity.
+ 6664 -          - 		 */
+ 6665 - 2292 calls - 		if (sd_parent) {
+ 6666 -          - 			int *group_imbalance = &sd_parent->groups->sgc->imbalance;
+ 6667 -          - 
+ 6668 -          - 			if ((env.flags & LBF_SOME_PINNED) && env.imbalance > 0) {
+ 6669 -          - 				*group_imbalance = 1;
+ 6670 -          - 			} else if (*group_imbalance)
+ 6671 -          - 				*group_imbalance = 0;
+ 6672 -          - 		}
+ 6673 -          - 
+ 6674 -          - 		/* All tasks on this runqueue were pinned by CPU affinity */
+ 6675 - 2292 calls - 		if (unlikely(env.flags & LBF_ALL_PINNED)) {
+ 6676 - 2292 calls - 			cpumask_clear_cpu(cpu_of(busiest), cpus);
+ 6677 - 2292 calls - 			if (!cpumask_empty(cpus)) {
+ 6678 - 2292 calls - 				env.loop = 0;
+ 6679 -          - 				env.loop_break = sched_nr_migrate_break;
+ 6680 - 2292 calls - 				goto redo;
+ 6681 -          - 			}
+ 6682 -          - 			goto out_balanced;
+ 6683 -          - 		}
+ 6684 -          - 	}
+ 6685 -          - 
+ 6686 -  4 calls - 	if (!ld_moved) {
+ 6687 -  4 calls - 		schedstat_inc(sd, lb_failed[idle]);
+ 6688 -          - 		/*
+ 6689 -          - 		 * Increment the failure counter only on periodic balance.
+ 6690 -          - 		 * We do not want newidle balance, which can be very
+ 6691 -          - 		 * frequent, pollute the failure counter causing
+ 6692 -          - 		 * excessive cache_hot migrations and active balances.
+ 6693 -          - 		 */
+ 6694 -  4 calls - 		if (idle != CPU_NEWLY_IDLE)
+ 6695 -  4 calls - 			sd->nr_balance_failed++;
+ 6696 -          - 
+ 6697 -  4 calls - 		if (need_active_balance(&env)) {
+ 6698 -          - 			raw_spin_lock_irqsave(&busiest->lock, flags);
+ 6699 -          - 
+ 6700 -          - 			/* don't kick the active_load_balance_cpu_stop,
+ 6701 -          - 			 * if the curr task on busiest cpu can't be
+ 6702 -          - 			 * moved to this_cpu
+ 6703 -          - 			 */
+ 6704 -          - 			if (!cpumask_test_cpu(this_cpu,
+ 6705 -          - 					tsk_cpus_allowed(busiest->curr))) {
+ 6706 -          - 				raw_spin_unlock_irqrestore(&busiest->lock,
+ 6707 -          - 							    flags);
+ 6708 -          - 				env.flags |= LBF_ALL_PINNED;
+ 6709 -          - 				goto out_one_pinned;
+ 6710 -          - 			}
+ 6711 -          - 
+ 6712 -          - 			/*
+ 6713 -          - 			 * ->active_balance synchronizes accesses to
+ 6714 -          - 			 * ->active_balance_work.  Once set, it's cleared
+ 6715 -          - 			 * only after active load balance is finished.
+ 6716 -          - 			 */
+ 6717 -          - 			if (!busiest->active_balance) {
+ 6718 -          - 				busiest->active_balance = 1;
+ 6719 -          - 				busiest->push_cpu = this_cpu;
+ 6720 -          - 				active_balance = 1;
+ 6721 -          - 			}
+ 6722 -          - 			raw_spin_unlock_irqrestore(&busiest->lock, flags);
+ 6723 -          - 
+ 6724 -          - 			if (active_balance) {
+ 6725 -          - 				stop_one_cpu_nowait(cpu_of(busiest),
+ 6726 -          - 					active_load_balance_cpu_stop, busiest,
+ 6727 -          - 					&busiest->active_balance_work);
+ 6728 -          - 			}
+ 6729 -          - 
+ 6730 -          - 			/*
+ 6731 -          - 			 * We've kicked active balancing, reset the failure
+ 6732 -          - 			 * counter.
+ 6733 -          - 			 */
+ 6734 -          - 			sd->nr_balance_failed = sd->cache_nice_tries+1;
+ 6735 -          - 		}
+ 6736 -          - 	} else
+ 6737 -          - 		sd->nr_balance_failed = 0;
+ 6738 -          - 
+ 6739 -  4 calls - 	if (likely(!active_balance)) {
+ 6740 -          - 		/* We were unbalanced, so reset the balancing interval */
+ 6741 -  4 calls - 		sd->balance_interval = sd->min_interval;
+ 6742 -          - 	} else {
+ 6743 -          - 		/*
+ 6744 -          - 		 * If we've begun active balancing, start to back off. This
+ 6745 -          - 		 * case may not be covered by the all_pinned logic if there
+ 6746 -          - 		 * is only 1 task on the busy runqueue (because we don't call
+ 6747 -          - 		 * move_tasks).
+ 6748 -          - 		 */
+ 6749 -          - 		if (sd->balance_interval < sd->max_interval)
+ 6750 -          - 			sd->balance_interval *= 2;
+ 6751 -          - 	}
+ 6752 -          - 
+ 6753 -  4 calls - 	goto out;
+ 6754 -          - 
+ 6755 -          - out_balanced:
+ 6756 - 9925 calls - 	schedstat_inc(sd, lb_balanced[idle]);
+ 6757 -          - 
+ 6758 - 9925 calls - 	sd->nr_balance_failed = 0;
+ 6759 -          - 
+ 6760 -          - out_one_pinned:
+ 6761 -          - 	/* tune up the balancing interval */
+ 6762 - 9925 calls - 	if (((env.flags & LBF_ALL_PINNED) &&
+ 6763 - 59 calls - 			sd->balance_interval < MAX_PINNED_INTERVAL) ||
+ 6764 - 9925 calls - 			(sd->balance_interval < sd->max_interval))
+ 6765 -  4 calls - 		sd->balance_interval *= 2;
+ 6766 -          - 
+ 6767 - 9925 calls - 	ld_moved = 0;
+ 6768 -          - out:
+ 6769 - 9929 calls - 	return ld_moved;
+ 6770 - 9929 calls - }

@@ -1,0 +1,45 @@
+#! /usr/bin/env stap
+
+global active
+global current_indexes
+global current_lines
+global buggy_lines
+
+probe module("stap_monitor") . function("control_stap") . call {
+   printf("CPU %d status %d\n", $cpu, $activate);
+   active[$cpu] = $activate;
+}
+
+//probe kernel . function("load_balance") . call {
+probe kernel . function("load_balance") {
+   if(active[cpu()] < 10) next;
+   printf("Load balanced called on cpu %d %s\n", cpu(), $$parms);
+   current_indexes[cpu()] = 0;
+}
+probe kernel . statement("load_balance@*:*") {
+   if(active[cpu()] <10) next;
+   tokenize(pp(),"@");
+   fileline=tokenize("","@");
+   file=tokenize(fileline,":\"");
+   line=tokenize("",":\"");
+   i = current_indexes[cpu()];
+   current_indexes[cpu()]++;
+   current_lines[cpu(),i] = strtol(line, 10);
+}
+probe kernel . function("load_balance") . return {
+   if(!(current_indexes[cpu()] > 0)) next;
+   if($return == 0) {
+      foreach([cpu,i] in current_lines[cpu(),*]) {
+         if(i >= current_indexes[cpu]) next;
+         #printf("line \"%d\"\n", current_lines[cpu, i]);
+         buggy_lines[current_lines[cpu,i]] ++;
+      }
+   }
+}
+
+probe end {
+   printf("Most buggy lines:\n");
+   foreach(line+ in buggy_lines) {
+      printf("\tline: %d - %d\n", line, buggy_lines[line]);
+   }
+}

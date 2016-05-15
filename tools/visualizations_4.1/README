@@ -1,0 +1,32 @@
+To run a profiling session:
+===========================
+1/ Patch your 4.1 kernel using sched_profiler/sched_profiler_linux_4.1.patch,
+install it, and reboot.. Warning: the patch only works for machines with 64 
+cores at most, because some core bitfields ('considered_cores') are stored in 
+64-bit integers.
+2/ Go to sched_profiler/ and run 'make'.
+3/ Then run your profiling session, using:
+
+sudo insmod sched_profiler.ko
+
+<Run something you want to profile.>
+
+cat /proc/sched_profiler > output
+sudo rmmod sched_profiler.ko
+
+An example output file is provided in sample_output/. Check it looks like yours.
+
+To plot graphs:
+===============
+1/ Enter the plots/ directory.
+2/ You can use generate_rows_sched_profiler.sh to produce several graphs. You
+may need to update some variables in the script. Example output is provided in
+sample_output/.
+
+You can have a look at parse_rows_sched_profiler.php and scripts in misc/ to
+produce different graphs. For examples of graphs we produced, see:
+http://sfu.lozi.org/results/
+
+Not all scripts that have been used to produced these graphs are packaged in
+this archive. For more information, send an e-mail to jplozi@unice.fr.
+

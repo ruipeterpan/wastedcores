@@ -1,0 +1,22 @@
+1/ Patch your 4.1 kernel with sanity_checker_linux_4.1.patch and reboot on the 
+patched kernel.
+
+2/ Compile the kernel module contained in stap_monitor (make).
+
+3/ # insmod stap_monitor.ko
+Doing so will start a timer that will periodically check invariants. The output 
+of the timer can be seen using dmesg. This is the fastest and most lightweight 
+way to check if invariants are broken.
+
+4/ In order to generate full bug reports, you have to launch a systemtap script 
+before insmod'ing stap_monitor.ko:
+
+# stap stap_monitor_callg.stp
+... wait for everything to be compiled and running
+# insmod stap_monitor.ko
+
+Systemtap will automatically dump execution traces of load balancing calls that 
+failed to balance the load. You might have to add options to stap in order for 
+it to work (by default systemtap has very conservative values for maximum 
+possible overhead, and the overhead of generating the bug reports - when we do 
+- is big).

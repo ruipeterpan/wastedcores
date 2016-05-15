@@ -1,0 +1,24 @@
+#! /usr/bin/env stap
+
+global active
+global in_load_balancing
+global printed
+
+
+probe kernel . function("*@kernel/sched/fair.c") {
+   if(in_load_balancing[cpu()] != 1) next;
+   if(printed[pp()] == 1) next;
+   printed[pp()] = 1
+   printf("%s\n", pp());
+}
+
+probe kernel . function("load_balance") {
+   active[0] = 1
+   if(active[cpu()] != 1) next;
+   in_load_balancing[cpu()] = 1;
+}
+
+probe kernel . function("load_balance") . return {
+   if(active[cpu()] != 1) next;
+   in_load_balancing[cpu()] = 0;
+}
